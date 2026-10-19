@@ -1,0 +1,167 @@
+# Builds the Milk-V Jupiter kernels (every linux-*-patches/ version x every flavor) as
+# Debian packages. Pushing a tag v* also publishes a GitHub release with the packages.
+#
+#   git tag v2026.10.19 && git push origin v2026.10.19
+#
+# The debian flavor has DEBUG_INFO (like Debian), so it is slow on a hosted runner (a few
+# hours) and needs ~31 GB of disk; the job frees space on the runner first.
+name: Build kernels
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'linux-*-patches/**'
+      - 'configs/**'
+      - 'scripts/**'
+      - 'Makefile'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+    inputs:
+      flavors:
+        description: 'Flavors to build (JSON list)'
+        default: '["builtin", "modules", "debian"]'
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    name: Find versions
+    runs-on: ubuntu-24.04
+    outputs:
+      versions: ${{ steps.find.outputs.versions }}
+      flavors: ${{ steps.find.outputs.flavors }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        env:
+          FLAVORS: ${{ github.event.inputs.flavors || '["builtin", "modules", "debian"]' }}
+        run: |
+          versions=$(find . -maxdepth 1 -type d -name 'linux-*-patches' -printf '%f\n' | sort -V |
+            sed 's/^linux-\(.*\)-patches$/\1/' | jq -R . | jq -sc .)
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+          echo "flavors=$(jq -c . <<<"$FLAVORS")" >> "$GITHUB_OUTPUT"
+          echo "versions: $versions, flavors: $FLAVORS"
+
+  build:
+    name: ${{ matrix.version }}-${{ matrix.flavor }}
+    needs: matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.matrix.outputs.versions) }}
+        flavor: ${{ fromJSON(needs.matrix.outputs.flavors) }}
+    env:
+      KERNEL_URL: https://github.com/torvalds/linux.git
+      KERNEL_DEPTH: '1'
+      # git am needs an identity; the patches keep their own author
+      GIT_COMMITTER_NAME: github-actions
+      GIT_COMMITTER_EMAIL: github-actions@users.noreply.github.com
+    steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
+                      /usr/local/share/boost /usr/local/.ghcup /usr/share/swift
+          sudo docker image prune --all --force >/dev/null || true
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            gcc-riscv64-linux-gnu build-essential bc bison flex cpio kmod rsync \
+            libssl-dev libelf-dev dwarves dpkg-dev debhelper fakeroot python3 git
+          riscv64-linux-gnu-gcc --version | head -1
+          pahole --version
+
+      - name: Check out kernel and apply patches
+        run: make checkout-${{ matrix.version }}
+
+      - name: Build package
+        run: |
+          mkdir -p out
+          make deb-${{ matrix.version }}-${{ matrix.flavor }} \
+            PKGREV=${{ github.run_number }} JOBS="$(nproc)" DEBDIR="$PWD/out" \
+            || { df -h /; exit 1; }
+          ls -la out/
+          df -h /
+
+      # builtin: also the bare Image.gz + dtb + config, usable without unpacking a deb
+      - name: Kernel image files
+        if: matrix.flavor == 'builtin'
+        run: |
+          make image-${{ matrix.version }}-builtin JOBS="$(nproc)" DEBDIR="$PWD/out"
+          ls -la out/
+
+      # linux-libc-dev is not needed on the board
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.version }}-${{ matrix.flavor }}
+          path: |
+            out/linux-image-*.deb
+            out/Image-*.gz
+            out/k1-milkv-jupiter-*.dtb
+            out/config-*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kernel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la dist/
+          {
+            echo "Kernels for the Milk-V Jupiter (SpacemiT K1) with an AMD GPU, built from tag \`$TAG\`."
+            echo
+            echo "## Debian packages"
+            echo
+            echo "| Package | Flavor |"
+            echo "| --- | --- |"
+            for f in dist/*.deb; do
+              n=$(basename "$f")
+              case "$n" in
+                *-debian_*)  fl="debian: everything the Debian riscv64 kernel enables, initramfs" ;;
+                *-modules_*) fl="modules: distro-style, initramfs, firmware from /lib/firmware" ;;
+                *)           fl="builtin: everything built in incl. GPU firmware" ;;
+              esac
+              echo "| \`$n\` | $fl |"
+            done
+            echo
+            echo "Install on the board with \`sudo dpkg -i <package>\` (modules/debian: also"
+            echo "\`sudo apt install firmware-amd-graphics\`) and boot with"
+            echo "\`radeon.cik_support=0 amdgpu.cik_support=1\`. See the README for U-Boot."
+            echo
+            echo "## Kernel image files (builtin flavor, no modules, no initramfs needed)"
+            echo
+            for f in dist/Image-*.gz dist/k1-milkv-jupiter-*.dtb dist/config-*; do
+              echo "- \`$(basename "$f")\`"
+            done
+            echo
+            echo "Copy \`Image-<release>.gz\` and \`k1-milkv-jupiter-<release>.dtb\` to a partition"
+            echo "U-Boot can read (SD, USB or eMMC) and boot them with \`booti\`; see the README,"
+            echo "*Booting the kernel image files*."
+          } > notes.md
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" --notes-file notes.md

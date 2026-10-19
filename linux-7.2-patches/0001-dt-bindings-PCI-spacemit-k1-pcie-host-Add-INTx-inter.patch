@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bas=20Magr=C3=A9?= <bas@opvolger.net>
+Date: Mon, 19 Oct 2026 20:07:10 +0200
+Subject: [PATCH 01/12] dt-bindings: PCI: spacemit,k1-pcie-host: Add INTx
+ interrupt controller
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The K1 PCIe controller signals legacy INTx on the same physical
+interrupt line as MSI.  Describe an optional "interrupt-controller"
+child node that demultiplexes the INTx summary interrupt into the four
+INTx lines, so it can be the target of interrupt-map entries.
+
+Signed-off-by: Bas Magré <bas@opvolger.net>
+---
+ .../bindings/pci/spacemit,k1-pcie-host.yaml   | 38 ++++++++++++++++++-
+ 1 file changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/pci/spacemit,k1-pcie-host.yaml b/Documentation/devicetree/bindings/pci/spacemit,k1-pcie-host.yaml
+index c4c00b5fcdc0..97cd2cf7f7fc 100644
+--- a/Documentation/devicetree/bindings/pci/spacemit,k1-pcie-host.yaml
++++ b/Documentation/devicetree/bindings/pci/spacemit,k1-pcie-host.yaml
+@@ -12,7 +12,10 @@ maintainers:
+ description: >
+   The SpacemiT K1 SoC PCIe host controller is based on the Synopsys DesignWare
+   PCIe IP.  The controller uses the DesignWare built-in MSI interrupt
+-  controller, and supports 256 MSIs.
++  controller, and supports 256 MSIs.  It also supports legacy INTx
++  interrupts, which share the same physical interrupt line as MSI and are
++  demultiplexed into the four INTx lines by a child interrupt controller
++  node.
+ 
+ allOf:
+   - $ref: /schemas/pci/snps,dw-pcie.yaml#
+@@ -61,11 +64,30 @@ properties:
+ 
+   interrupts:
+     items:
+-      - description: Interrupt used for MSIs
++      - description: Interrupt used for MSIs and, if present, legacy INTx
+ 
+   interrupt-names:
+     const: msi
+ 
++  interrupt-controller:
++    type: object
++    description:
++      Software interrupt controller that demultiplexes the legacy INTx
++      summary interrupt -- which the controller signals on the same
++      physical line as MSI -- into the four INTx lines, for use as the
++      target of interrupt-map entries.
++    properties:
++      '#address-cells':
++        const: 0
++      '#interrupt-cells':
++        const: 1
++      interrupt-controller: true
++    required:
++      - '#address-cells'
++      - '#interrupt-cells'
++      - interrupt-controller
++    additionalProperties: false
++
+   spacemit,apmu:
+     $ref: /schemas/types.yaml#/definitions/phandle-array
+     description:
+@@ -123,10 +145,16 @@ examples:
+                     "link";
+         #address-cells = <3>;
+         #size-cells = <2>;
++        #interrupt-cells = <1>;
+         ranges = <0x01000000 0x0 0x00000000 0x9f002000 0x0 0x00100000>,
+                  <0x02000000 0x0 0x90000000 0x90000000 0x0 0x0f000000>;
+         interrupts = <142>;
+         interrupt-names = "msi";
++        interrupt-map-mask = <0x0 0x0 0x0 0x7>;
++        interrupt-map = <0x0 0x0 0x0 0x1 &pcie1_intc 0x0>,
++                        <0x0 0x0 0x0 0x2 &pcie1_intc 0x1>,
++                        <0x0 0x0 0x0 0x3 &pcie1_intc 0x2>,
++                        <0x0 0x0 0x0 0x4 &pcie1_intc 0x3>;
+         clocks = <&syscon_apmu CLK_PCIE1_DBI>,
+                  <&syscon_apmu CLK_PCIE1_MASTER>,
+                  <&syscon_apmu CLK_PCIE1_SLAVE>;
+@@ -143,6 +171,12 @@ examples:
+         pinctrl-0 = <&pcie1_3_cfg>;
+         spacemit,apmu = <&syscon_apmu 0x3d4>;
+ 
++        pcie1_intc: interrupt-controller {
++          #address-cells = <0>;
++          #interrupt-cells = <1>;
++          interrupt-controller;
++        };
++
+         pcie@0 {
+           device_type = "pci";
+           compatible = "pciclass,0604";

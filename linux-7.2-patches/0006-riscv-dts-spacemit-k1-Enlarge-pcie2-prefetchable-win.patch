@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bas=20Magr=C3=A9?= <bas@opvolger.net>
+Date: Mon, 19 Oct 2026 20:07:11 +0200
+Subject: [PATCH 06/12] riscv: dts: spacemit: k1: Enlarge pcie2 prefetchable
+ window to 264M
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+AMD Hawaii (R9 290/390) has two 64-bit prefetchable BARs: 256M VRAM and
+8M doorbells.  They do not fit in the 256M prefetchable window of
+pcie2, so neither gets assigned and amdgpu fails with BAR=0M.
+
+Grow the prefetchable window to 264M and let the non-prefetchable
+window start at 0xb0800000 (104M).  The total range is unchanged.
+
+Signed-off-by: Bas Magré <bas@opvolger.net>
+---
+ arch/riscv/boot/dts/spacemit/k1.dtsi | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/arch/riscv/boot/dts/spacemit/k1.dtsi b/arch/riscv/boot/dts/spacemit/k1.dtsi
+index c1a5b08494dd..fd2e39f1ed18 100644
+--- a/arch/riscv/boot/dts/spacemit/k1.dtsi
++++ b/arch/riscv/boot/dts/spacemit/k1.dtsi
+@@ -1277,9 +1277,15 @@ pcie2: pcie@ca800000 {
+ 				#address-cells = <3>;
+ 				#size-cells = <2>;
+ 				#interrupt-cells = <1>;
++				/*
++				 * Prefetchable window enlarged from 256M to 264M (and the
++				 * non-prefetchable window shrunk to start at 0xb0800000) so a
++				 * GPU with a 256M VRAM BAR plus an 8M doorbell BAR (both
++				 * prefetchable, e.g. AMD Hawaii) fits.  Total range unchanged.
++				 */
+ 				ranges = <0x01000000 0x0 0x00000000 0x0 0xb7002000 0x0 0x00100000>,
+-					 <0x42000000 0x0 0xa0000000 0x0 0xa0000000 0x0 0x10000000>,
+-					 <0x02000000 0x0 0xb0000000 0x0 0xb0000000 0x0 0x07000000>;
++					 <0x42000000 0x0 0xa0000000 0x0 0xa0000000 0x0 0x10800000>,
++					 <0x02000000 0x0 0xb0800000 0x0 0xb0800000 0x0 0x06800000>;
+ 				interrupts = <143>;
+ 				interrupt-names = "msi";
+ 				interrupt-map-mask = <0x0 0x0 0x0 0x7>;

@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bas=20Magr=C3=A9?= <bas@opvolger.net>
+Date: Mon, 19 Oct 2026 20:07:10 +0200
+Subject: [PATCH 03/12] PCI: spacemit-k1: Look up the root port by device_type
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+k1_pcie_parse_port() took the first available child node as the root
+port.  With an INTx "interrupt-controller" child node placed before
+"pcie@0" in the device tree, that node is picked instead; it has no
+"phys" property, so probing fails with:
+
+  spacemit-k1-pcie ca800000.pcie: error -ENODEV: failed to parse root port
+
+Pick the child node with device_type = "pci" instead.
+
+Signed-off-by: Bas Magré <bas@opvolger.net>
+---
+ drivers/pci/controller/dwc/pcie-spacemit-k1.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/pci/controller/dwc/pcie-spacemit-k1.c b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+index 04241df8fd59..12e9cd2dbcc2 100644
+--- a/drivers/pci/controller/dwc/pcie-spacemit-k1.c
++++ b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+@@ -12,6 +12,7 @@
+ #include <linux/err.h>
+ #include <linux/gfp.h>
+ #include <linux/mfd/syscon.h>
++#include <linux/of.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+ #include <linux/regmap.h>
+@@ -258,8 +259,13 @@ static int k1_pcie_parse_port(struct k1_pcie *k1)
+ 	struct device_node *root_port;
+ 	struct phy *phy;
+ 
+-	/* We assume only one root port */
+-	root_port = of_get_next_available_child(dev_of_node(dev), NULL);
++	/*
++	 * We assume only one root port.  Skip the INTx interrupt-controller
++	 * child node, it is not a port.
++	 */
++	for_each_available_child_of_node(dev_of_node(dev), root_port)
++		if (of_node_is_type(root_port, "pci"))
++			break;
+ 	if (!root_port)
+ 		return -EINVAL;
+ 

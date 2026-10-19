@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bas=20Magr=C3=A9?= <bas@opvolger.net>
+Date: Mon, 19 Oct 2026 20:07:13 +0200
+Subject: [PATCH 05/12] riscv: dts: spacemit: k1: Add PCIe INTx interrupt
+ controllers
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add an INTx "interrupt-controller" child node to each PCIe controller
+and route the four INTx pins to it with interrupt-map, so devices that
+only use legacy interrupts get a working IRQ.
+
+Signed-off-by: Bas Magré <bas@opvolger.net>
+---
+ arch/riscv/boot/dts/spacemit/k1.dtsi | 36 ++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/arch/riscv/boot/dts/spacemit/k1.dtsi b/arch/riscv/boot/dts/spacemit/k1.dtsi
+index 3fabfd34114b..520a14e4c6f9 100644
+--- a/arch/riscv/boot/dts/spacemit/k1.dtsi
++++ b/arch/riscv/boot/dts/spacemit/k1.dtsi
+@@ -1174,10 +1174,16 @@ pcie0: pcie@ca000000 {
+ 				linux,pci-domain = <0>;
+ 				#address-cells = <3>;
+ 				#size-cells = <2>;
++				#interrupt-cells = <1>;
+ 				ranges = <0x01000000 0x0 0x00000000 0x0 0x8f002000 0x0 0x00100000>,
+ 					 <0x02000000 0x0 0x80000000 0x0 0x80000000 0x0 0x0f000000>;
+ 				interrupts = <141>;
+ 				interrupt-names = "msi";
++				interrupt-map-mask = <0x0 0x0 0x0 0x7>;
++				interrupt-map = <0x0 0x0 0x0 0x1 &pcie0_intc 0x0>,
++						 <0x0 0x0 0x0 0x2 &pcie0_intc 0x1>,
++						 <0x0 0x0 0x0 0x3 &pcie0_intc 0x2>,
++						 <0x0 0x0 0x0 0x4 &pcie0_intc 0x3>;
+ 				clocks = <&syscon_apmu CLK_PCIE0_DBI>,
+ 					 <&syscon_apmu CLK_PCIE0_MASTER>,
+ 					 <&syscon_apmu CLK_PCIE0_SLAVE>;
+@@ -1193,6 +1199,12 @@ pcie0: pcie@ca000000 {
+ 				spacemit,apmu = <&syscon_apmu 0x03cc>;
+ 				status = "disabled";
+ 
++				pcie0_intc: interrupt-controller {
++					#address-cells = <0>;
++					#interrupt-cells = <1>;
++					interrupt-controller;
++				};
++
+ 				pcie0_port: pcie@0 {
+ 					device_type = "pci";
+ 					compatible = "pciclass,0604";
+@@ -1218,10 +1230,16 @@ pcie1: pcie@ca400000 {
+ 				linux,pci-domain = <1>;
+ 				#address-cells = <3>;
+ 				#size-cells = <2>;
++				#interrupt-cells = <1>;
+ 				ranges = <0x01000000 0x0 0x00000000 0x0 0x9f002000 0x0 0x00100000>,
+ 					 <0x02000000 0x0 0x90000000 0x0 0x90000000 0x0 0x0f000000>;
+ 				interrupts = <142>;
+ 				interrupt-names = "msi";
++				interrupt-map-mask = <0x0 0x0 0x0 0x7>;
++				interrupt-map = <0x0 0x0 0x0 0x1 &pcie1_intc 0x0>,
++						 <0x0 0x0 0x0 0x2 &pcie1_intc 0x1>,
++						 <0x0 0x0 0x0 0x3 &pcie1_intc 0x2>,
++						 <0x0 0x0 0x0 0x4 &pcie1_intc 0x3>;
+ 				clocks = <&syscon_apmu CLK_PCIE1_DBI>,
+ 					 <&syscon_apmu CLK_PCIE1_MASTER>,
+ 					 <&syscon_apmu CLK_PCIE1_SLAVE>;
+@@ -1237,6 +1255,12 @@ pcie1: pcie@ca400000 {
+ 				spacemit,apmu = <&syscon_apmu 0x3d4>;
+ 				status = "disabled";
+ 
++				pcie1_intc: interrupt-controller {
++					#address-cells = <0>;
++					#interrupt-cells = <1>;
++					interrupt-controller;
++				};
++
+ 				pcie1_port: pcie@0 {
+ 					device_type = "pci";
+ 					compatible = "pciclass,0604";
+@@ -1262,11 +1286,17 @@ pcie2: pcie@ca800000 {
+ 				linux,pci-domain = <2>;
+ 				#address-cells = <3>;
+ 				#size-cells = <2>;
++				#interrupt-cells = <1>;
+ 				ranges = <0x01000000 0x0 0x00000000 0x0 0xb7002000 0x0 0x00100000>,
+ 					 <0x42000000 0x0 0xa0000000 0x0 0xa0000000 0x0 0x10000000>,
+ 					 <0x02000000 0x0 0xb0000000 0x0 0xb0000000 0x0 0x07000000>;
+ 				interrupts = <143>;
+ 				interrupt-names = "msi";
++				interrupt-map-mask = <0x0 0x0 0x0 0x7>;
++				interrupt-map = <0x0 0x0 0x0 0x1 &pcie2_intc 0x0>,
++						 <0x0 0x0 0x0 0x2 &pcie2_intc 0x1>,
++						 <0x0 0x0 0x0 0x3 &pcie2_intc 0x2>,
++						 <0x0 0x0 0x0 0x4 &pcie2_intc 0x3>;
+ 				clocks = <&syscon_apmu CLK_PCIE2_DBI>,
+ 					 <&syscon_apmu CLK_PCIE2_MASTER>,
+ 					 <&syscon_apmu CLK_PCIE2_SLAVE>;
+@@ -1282,6 +1312,12 @@ pcie2: pcie@ca800000 {
+ 				spacemit,apmu = <&syscon_apmu 0x3dc>;
+ 				status = "disabled";
+ 
++				pcie2_intc: interrupt-controller {
++					#address-cells = <0>;
++					#interrupt-cells = <1>;
++					interrupt-controller;
++				};
++
+ 				pcie2_port: pcie@0 {
+ 					device_type = "pci";
+ 					compatible = "pciclass,0604";

@@ -1,0 +1,19 @@
+# Debian packages and what dpkg-buildpackage puts next to them
+*.deb
+*.buildinfo
+*.changes
+# Ready-to-use kernel files from make image-V-builtin
+/Image-*.gz
+/k1-milkv-jupiter-*.dtb
+/config-*
+
+# Kernel git, kernel trees (worktrees) and builds; the patches themselves are tracked
+/.kernel.git/
+/linux/
+/linux-*/
+!/linux-*-patches/
+/linux-firmware/
+/build/
+
+# Screen captures
+*.png

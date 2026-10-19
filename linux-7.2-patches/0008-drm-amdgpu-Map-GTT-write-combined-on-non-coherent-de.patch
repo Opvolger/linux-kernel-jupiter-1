@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bas=20Magr=C3=A9?= <bas@opvolger.net>
+Date: Mon, 19 Oct 2026 20:07:11 +0200
+Subject: [PATCH 08/12] drm/amdgpu: Map GTT write-combined on non-coherent
+ devices
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On platforms where PCIe DMA does not snoop the CPU caches (e.g. the
+SpacemiT K1, "dma-noncoherent"), a cached GTT buffer is broken: CPU
+writes such as ring buffer commands stay in the CPU cache and the GPU
+reads stale RAM, so the ring test times out:
+
+  amdgpu: ring gfx test failed (-110)
+
+Map all GTT buffers write-combined on such devices.  The SpacemiT
+vendor kernel does the same under CONFIG_SOC_SPACEMIT_K1X.
+
+Signed-off-by: Bas Magré <bas@opvolger.net>
+---
+ drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
+index eaa86e32912e..d6ad6052fc17 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
+@@ -31,6 +31,7 @@
+  */
+ 
+ #include <linux/dma-mapping.h>
++#include <linux/dma-map-ops.h>
+ #include <linux/iommu.h>
+ #include <linux/pagemap.h>
+ #include <linux/sched/task.h>
+@@ -1204,6 +1205,17 @@ static struct ttm_tt *amdgpu_ttm_tt_create(struct ttm_buffer_object *bo,
+ 	else
+ 		caching = ttm_cached;
+ 
++	/*
++	 * On platforms where PCIe DMA does not snoop the CPU caches (e.g. the
++	 * SpacemiT K1, "dma-noncoherent"), a cached GTT buffer is broken: CPU
++	 * writes (ring buffer commands) stay in the CPU cache and the GPU reads
++	 * stale RAM, so the ring test times out.  Map all GTT buffers
++	 * write-combined (uncached) on such devices.  The SpacemiT vendor kernel
++	 * does the same with an #ifdef CONFIG_SOC_SPACEMIT_K1X.
++	 */
++	if (!dev_is_dma_coherent(adev->dev))
++		caching = ttm_write_combined;
++
+ 	/* allocate space for the uninitialized page entries */
+ 	if (ttm_sg_tt_init(&gtt->ttm, bo, page_flags, caching)) {
+ 		kfree(gtt);

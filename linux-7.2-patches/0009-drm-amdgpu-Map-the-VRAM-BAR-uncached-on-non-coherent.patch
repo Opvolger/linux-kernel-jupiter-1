@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bas=20Magr=C3=A9?= <bas@opvolger.net>
+Date: Mon, 19 Oct 2026 20:07:12 +0200
+Subject: [PATCH 09/12] drm/amdgpu: Map the VRAM BAR uncached on non-coherent
+ devices
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On the SpacemiT K1, CPU writes to VRAM through a write-combined
+(RISC-V Svpbmt NC) BAR mapping can still be in flight when the doorbell
+write reaches the GPU, so the GPU reads stale vertex/constant data,
+visible as stretched triangles on the desktop.
+
+Map the VRAM BAR uncached (Svpbmt IO, strongly ordered) on devices that
+are not DMA-coherent, as the SpacemiT vendor kernel does.  Misaligned
+user accesses to such a mapping need the access-fault emulation in
+arch/riscv/kernel/traps.c.
+
+Signed-off-by: Bas Magré <bas@opvolger.net>
+---
+ drivers/gpu/drm/amd/amdgpu/amdgpu_vram_mgr.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vram_mgr.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_vram_mgr.c
+index 2a241a5b12c4..4f6c574d9e5b 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vram_mgr.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vram_mgr.c
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include <linux/dma-mapping.h>
++#include <linux/dma-map-ops.h>
+ #include <drm/ttm/ttm_range_manager.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_buddy.h>
+@@ -607,6 +608,18 @@ static int amdgpu_vram_mgr_new(struct ttm_resource_manager *man,
+ 
+ 	if (adev->gmc.xgmi.connected_to_cpu)
+ 		vres->base.bus.caching = ttm_cached;
++	else if (!dev_is_dma_coherent(adev->dev))
++		/*
++		 * On non-coherent platforms such as the SpacemiT K1, CPU writes
++		 * to VRAM through a write-combined (RISC-V Svpbmt NC) BAR mapping
++		 * can still be in flight when the doorbell (strongly ordered IO)
++		 * reaches the GPU, so the GPU reads stale vertex/constant data
++		 * (stretched triangles on the desktop).  Map the VRAM BAR
++		 * uncached (IO, strongly ordered) instead.  The SpacemiT vendor
++		 * kernel does the same for CONFIG_SOC_SPACEMIT_K1X.  Misaligned
++		 * user accesses to it are emulated, see arch/riscv/kernel/traps.c.
++		 */
++		vres->base.bus.caching = ttm_uncached;
+ 	else
+ 		vres->base.bus.caching = ttm_write_combined;
+ 

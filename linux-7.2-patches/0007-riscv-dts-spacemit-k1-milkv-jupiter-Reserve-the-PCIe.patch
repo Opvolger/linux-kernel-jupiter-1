@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bas=20Magr=C3=A9?= <bas@opvolger.net>
+Date: Mon, 19 Oct 2026 20:07:11 +0200
+Subject: [PATCH 07/12] riscv: dts: spacemit: k1-milkv-jupiter: Reserve the
+ PCIe DMA hole
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The pcie-bus dma-ranges give RAM 0x1_0000_0000-0x1_37ff_ffff no bus
+address (that bus range is the PCIe MMIO window), so DMA to it is
+bounced through swiotlb.  A GPU keeps buffers such as ring buffers and
+fences mapped for a long time and does not survive bouncing.  Keep the
+kernel from using this 896M of RAM.
+
+Not strictly required to bring up amdgpu, but protects long-lived GPU
+buffers from bouncing under memory pressure.
+
+Signed-off-by: Bas Magré <bas@opvolger.net>
+---
+ .../boot/dts/spacemit/k1-milkv-jupiter.dts    | 21 +++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/arch/riscv/boot/dts/spacemit/k1-milkv-jupiter.dts b/arch/riscv/boot/dts/spacemit/k1-milkv-jupiter.dts
+index 2fc8d6533786..1c3d2b9ab493 100644
+--- a/arch/riscv/boot/dts/spacemit/k1-milkv-jupiter.dts
++++ b/arch/riscv/boot/dts/spacemit/k1-milkv-jupiter.dts
+@@ -11,6 +11,27 @@ / {
+ 	model = "Milk-V Jupiter (K1)";
+ 	compatible = "milkv,jupiter", "spacemit,k1";
+ 
++	/*
++	 * PCIe DMA hole: the pcie-bus dma-ranges in k1.dtsi map bus addresses
++	 * 0x0_0000_0000-0x0_7fff_ffff -> RAM 0x0_0000_0000 and
++	 * 0x0_b800_0000-... -> RAM 0x1_3800_0000.  RAM at
++	 * 0x1_0000_0000-0x1_37ff_ffff has no bus address (that bus range is
++	 * the PCIe MMIO window), so DMA to it gets bounced through swiotlb.
++	 * A GPU keeps buffers (ring buffers, fences) mapped for a long time
++	 * and does not survive bouncing: CPU writes after dma_map never reach
++	 * the bounce copy the GPU reads.  Keep the kernel from using this RAM.
++	 */
++	reserved-memory {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		pcie_dma_hole: memory@100000000 {
++			reg = <0x1 0x00000000 0x0 0x38000000>;
++			no-map;
++		};
++	};
++
+ 	aliases {
+ 		ethernet0 = &eth0;
+ 		ethernet1 = &eth1;

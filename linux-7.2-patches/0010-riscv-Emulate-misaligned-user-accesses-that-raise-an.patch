@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bas=20Magr=C3=A9?= <bas@opvolger.net>
+Date: Mon, 19 Oct 2026 20:07:12 +0200
+Subject: [PATCH 10/12] riscv: Emulate misaligned user accesses that raise an
+ access fault
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The SpacemiT X60 cores in the K1 raise a load/store access fault
+instead of an address-misaligned exception for a misaligned user
+access to an I/O mapping (Svpbmt IO), such as an uncached GPU VRAM BAR
+mapped by Mesa.  glibc's memcpy() does such accesses for the tail
+bytes, so Xorg and sddm-greeter die with SIGSEGV:
+
+  sddm-greeter-qt6: unhandled signal 11 code 0x2 ... in libc.so.6[83502]
+
+When a user access fault hits a misaligned address, try the existing
+misaligned-access emulation first (it uses byte accesses, which I/O
+regions accept), and only raise SIGSEGV if that fails.
+
+Signed-off-by: Bas Magré <bas@opvolger.net>
+---
+ arch/riscv/kernel/traps.c | 45 +++++++++++++++++++++++++++++++++++----
+ 1 file changed, 41 insertions(+), 4 deletions(-)
+
+diff --git a/arch/riscv/kernel/traps.c b/arch/riscv/kernel/traps.c
+index 8c62c771a656..f3029b14bcf0 100644
+--- a/arch/riscv/kernel/traps.c
++++ b/arch/riscv/kernel/traps.c
+@@ -193,8 +193,6 @@ asmlinkage __visible __trap_section void do_trap_insn_illegal(struct pt_regs *re
+ 	}
+ }
+ 
+-DO_ERROR_INFO(do_trap_load_fault,
+-	SIGSEGV, SEGV_ACCERR, "load access fault");
+ 
+ enum misaligned_access_type {
+ 	MISALIGNED_STORE,
+@@ -247,8 +245,47 @@ asmlinkage __visible __trap_section void do_trap_store_misaligned(struct pt_regs
+ 	do_trap_misaligned(regs, MISALIGNED_STORE);
+ }
+ 
+-DO_ERROR_INFO(do_trap_store_fault,
+-	SIGSEGV, SEGV_ACCERR, "store (or AMO) access fault");
++/*
++ * Some cores (e.g. the SpacemiT X60 in the K1) raise an access fault instead
++ * of an address-misaligned exception for a misaligned user access to an I/O
++ * (Svpbmt IO / PMA I/O) mapping, such as an uncached GPU BAR mapped by Mesa.
++ * glibc's memcpy() does such accesses for the tail bytes, so treat a user
++ * access fault on a misaligned address like a misaligned access and emulate
++ * it; the emulation uses byte accesses, which I/O regions accept.  A fault
++ * that the emulation cannot handle still raises SIGSEGV.
++ */
++static bool emulate_misaligned_access_fault(struct pt_regs *regs,
++					     enum misaligned_access_type type)
++{
++	if (!IS_ENABLED(CONFIG_RISCV_SCALAR_MISALIGNED))
++		return false;
++	if (!(regs->badaddr & (sizeof(long) - 1)))
++		return false;
++	return !misaligned_handler[type].handler(regs);
++}
++
++#define DO_ACCESS_FAULT(name, type, str)					\
++asmlinkage __visible __trap_section void name(struct pt_regs *regs)		\
++{										\
++	if (user_mode(regs)) {							\
++		irqentry_enter_from_user_mode(regs);				\
++		local_irq_enable();						\
++		if (!emulate_misaligned_access_fault(regs, type))		\
++			do_trap_error(regs, SIGSEGV, SEGV_ACCERR, regs->epc,	\
++				      "Oops - " str);				\
++		local_irq_disable();						\
++		irqentry_exit_to_user_mode(regs);				\
++	} else {								\
++		irqentry_state_t state = irqentry_nmi_enter(regs);		\
++		do_trap_error(regs, SIGSEGV, SEGV_ACCERR, regs->epc,		\
++			      "Oops - " str);					\
++		irqentry_nmi_exit(regs, state);					\
++	}									\
++}
++
++DO_ACCESS_FAULT(do_trap_load_fault, MISALIGNED_LOAD, "load access fault")
++DO_ACCESS_FAULT(do_trap_store_fault, MISALIGNED_STORE,
++		"store (or AMO) access fault")
+ DO_ERROR_INFO(do_trap_ecall_s,
+ 	SIGILL, ILL_ILLTRP, "environment call from S-mode");
+ DO_ERROR_INFO(do_trap_ecall_m,

@@ -1,0 +1,186 @@
+# AGENTS.md — Milk-V Jupiter (SpacemiT K1) + AMD GPU
+
+Read this first. The full log (what, why, with logs) is in `milk-v-testing.md`, steps 1–18.
+After **every failed attempt**, update that log (what went wrong and why), and add a comment with
+the reason to every kernel change. The user chats in Dutch; everything in this repo is English.
+
+## Current state (19 Oct 2026, end of session)
+
+- Board: Milk-V Jupiter (K1, 8 GB). GPU: AMD R9 290/390 (Hawaii, CIK) on pcie2 through a riser
+  (Gen1 x1). Debian 13 (trixie) + KDE Plasma 6 (Wayland) runs **without artifacts** (window
+  dragging test done on 7.2 modules, step 14/15).
+- Patch series `linux-7.2-patches/` and `linux-7.3-patches/` (12 patches each), three flavors.
+  **All six kernels (7.2/7.3 × builtin/modules/debian) were tested on the board** (step 18): PCIe
+  link, amdgpu init, IB ring tests, SDDM login screen over HDMI. Artifact test (dragging windows)
+  was not repeated for 7.3 and the debian flavor — do that when someone is at the board.
+- On the board now: default **`7.3.0-k1-amdgpu-modules`**; also installed `7.3.0-k1-amdgpu-debian`
+  and `7.2.0-k1-amdgpu-modules`. The user wants to run the **debian** flavor long term, but see the
+  next point first.
+- **Open bug, debian flavor only:** sporadic userspace crashes with wild pointers (`SEGV_MAPERR`)
+  in 2 of 7 boots of `7.3.0-k1-amdgpu-debian`: `nfsrahead`, and once **systemd (PID 1)**, which froze
+  the board (`unhandled signal 11 code 0x1 at 0xffffffffffffffbf in libsystemd-core-257.so`, load
+  page fault). Never seen with the builtin/modules kernels (>10 boots). Config differences that
+  could explain it: `TRANSPARENT_HUGEPAGE_ALWAYS=y` (prime suspect), `NUMA`, `KFENCE`,
+  `INIT_ON_ALLOC_DEFAULT_ON`, `RANDOMIZE_KSTACK_OFFSET_DEFAULT`, `SCHED_CLASS_EXT`. Next step:
+  boot the debian kernel repeatedly with `transparent_hugepage=never` (no rebuild needed) and count
+  crashes (`coredumpctl list`); then bisect the other options. Coredumps are on the board. Boots automatically via
+  `/boot.scr` (U-Boot `bootmenu_0`, `bootdelay=3`); switch with `milkv-tools/set-boot.sh <release>`.
+  Backups of earlier boot scripts: `/boot.cmd.<release>`. `/boot` has 261 MB free.
+- Built packages are in the repo root (`*.deb`, not in git). The two `-dbg` packages there (1.1 GB
+  each, from before `-dbg` was skipped) can be deleted.
+- Nothing has been committed to this repo yet and it has no GitHub remote yet (the user decides
+  when). `.github/workflows/build.yml` is ready but has never run on GitHub; it passes actionlint
+  and its checkout path (`KERNEL_DEPTH=1` from the GitHub mirror) was tested locally.
+- The old pre-restructure tree `linux/` (9.4 GB, in-tree build, not in git) is no longer needed and
+  can be removed; `.kernel.git` has its own copy of the objects.
+
+## Pick up next time
+
+1. `ssh 192.168.2.32 uname -r` (board up? power: `milkv-tools/power.sh state|on`).
+2. Newer kernel W released? `cp -r linux-7.3-patches linux-W-patches && make checkout-W`, fix
+   conflicts, `make export-W`, `scripts/fetch-debian-config.sh && make debian-defconfig-W`
+   (amend patch 0012), `make deb-W`, then `milkv-tools/test-kernel.sh <deb> <release>` per flavor.
+3. Open items below.
+
+## Repository layout
+
+| Path | What |
+| --- | --- |
+| `Makefile` | check out, patch and build; `make help` |
+| `linux-<V>-patches/` | the kernel changes for version V (`git format-patch`, tracked in git) |
+| `linux-<V>/` | kernel tree: git worktree of `.kernel.git`, branch `jupiter-<V>` (not in git) |
+| `.kernel.git/` | shared bare kernel git for all versions (not in git) |
+| `build/<V>-<flavor>/obj` | out-of-tree build (`O=`); debs land in `build/<V>-<flavor>/`, then are copied to the root |
+| `linux-firmware/` | upstream linux-firmware, for the builtin flavor (not in git; `make firmware`) |
+| `scripts/` | `kernel-tree.sh` (worktree + patches), `export-patches.sh` (commits → patches), `fetch-debian-config.sh`, `debian-defconfig.sh` |
+| `configs/debian/` | Debian riscv64 kernel config(s), input for the `debian` flavor |
+| `milkv-tools/` | board helpers: `test-kernel.sh` (install + boot + checks + screenshot), `install-deb.sh`, `set-boot.sh`, `power.sh`, `screenshot.sh`, `ser.py`/`catch.py` (serial) |
+| `*.deb` | built packages (in `.gitignore`); the package revision counts up automatically |
+| `Image-*.gz`, `k1-milkv-jupiter-*.dtb`, `config-*` | ready-to-use builtin kernel files from `make image-V-builtin` (in `.gitignore`; also in GitHub releases) |
+| `.github/workflows/build.yml` | CI: matrix version × flavor, uploads `linux-image-*.deb`; tag `v*` → GitHub release |
+
+Flavors: `builtin` = `k1_amdgpu_defconfig` (everything built in, GPU firmware via
+`CONFIG_EXTRA_FIRMWARE` from `../linux-firmware`), `modules` = `k1_amdgpu_modules_defconfig`
+(distro style, initramfs required, no firmware built in), `debian` = `k1_amdgpu_debian_defconfig`
+(everything Debian's riscv64 kernel enables minus other RISC-V SoCs; generated by
+`scripts/debian-defconfig.sh`, needs `pahole` for BTF/sched_ext). USB needs `USB_DWC3`,
+`USB_DWC3_GENERIC_PLAT`, `PHY_SPACEMIT_K1_USB2`, `USB_ONBOARD_DEV`.
+
+## The patches and why (do not revert)
+
+| Patch | What | Why |
+| --- | --- | --- |
+| 0001 dt-bindings | describe the INTx `interrupt-controller` child node | binding for 0004/0005 |
+| 0002 PCI: dwc | export `dw_handle_msi_irq()` | combined handler in 0004 (also as a module) |
+| 0003 PCI: spacemit-k1 | find the root port by `device_type = "pci"` | first child node is the INTx `interrupt-controller` → `-ENODEV` |
+| 0004 PCI: spacemit-k1 | INTx support (same IRQ line as MSI) | devices/functions without MSI |
+| 0005 dts k1 | INTx `interrupt-map` + controller per PCIe port | goes with 0004 |
+| 0006 dts k1 | pcie2 prefetchable window 256M → 264M | Hawaii has 256M + 8M prefetchable BARs, did not fit |
+| 0007 dts jupiter | `reserved-memory` for RAM 0x1_0000_0000–0x1_37ff_ffff | no PCIe bus address (swiotlb bounce); optional |
+| 0008 drm/amdgpu | GTT `ttm_write_combined` if `!dev_is_dma_coherent()` | K1 PCIe is not coherent; cached GTT → ring test fails |
+| 0009 drm/amdgpu | VRAM BAR `ttm_uncached` if `!dev_is_dma_coherent()` | WC (Svpbmt NC) to the BAR → GPU reads stale vertex data (triangles) |
+| 0010 riscv | user access fault on a misaligned address → misaligned emulation | X60 raises an access fault (not a misaligned trap) on IO; glibc `memcpy` does misaligned tail stores → SDDM/Xorg crashed |
+| 0011 riscv: configs | `k1_amdgpu_defconfig`, `k1_amdgpu_modules_defconfig` | |
+| 0012 riscv: configs | `k1_amdgpu_debian_defconfig` (generated, regenerate rather than edit) | |
+
+Bootargs (needed for Hawaii/CIK): `radeon.cik_support=0 amdgpu.cik_support=1`.
+
+## Already tried — do not repeat
+
+- GTT `ttm_uncached` (Svpbmt IO) instead of WC → Xorg/Mesa segfault (misaligned access on IO).
+  With the traps.c emulation it might work now, but it is not needed: GTT WC is fine.
+- Keeping `AMDGPU_PTE_SNOOPED` for BOs that were originally cached → did not help the artifacts.
+- Cores 1–7 offline (to rule out a race between harts) → same artifacts; no race.
+- Only the DMA hole reservation (without the amdgpu change) → ring test still fails.
+- VRAM `ttm_uncached` **without** the traps.c emulation → `sddm-greeter` crashes in
+  `libc.so.6+0x83502` (`sd t0,-8(a4)`).
+- Changing `pgprot_writecombine`/`pgprot_noncached`: identical to the vendor kernel, not the cause.
+- Vendor kernel reference (read only, do not copy): `spacemit-com/linux-6.6`, branch
+  `k1-bl-v2.2.y`, grep for `CONFIG_SOC_SPACEMIT_K1X`.
+
+## Open items
+
+- Artifact test (drag windows in KDE, capture frames) on 7.3 and the debian flavor.
+- One-off `nfsrahead` SIGSEGV (`SEGV_MAPERR`, jump to an unmapped address) during one boot of
+  `7.3.0-k1-amdgpu-debian` (step 18); not reproduced in 4 later boots. Watch `coredumpctl list`.
+- First boot of a new debian-flavor kernel takes ~3.5 min (AppArmor compiles its profile cache);
+  later boots ~40 s. Expected.
+- Slower because of uncached VRAM writes + a trap per misaligned tail. Possible improvement: only
+  make the buffers that need it uncached, or find out why WC + fence is not enough on the X60.
+- HD 5450 (`radeon`) probably needs the same fixes in `radeon_ttm.c`; not tested.
+- After a failed amdgpu init: Oops in `amdgpu_vce_sw_fini` (cleanup path), separate issue.
+- The `linux-headers` deb can't be cross-built (Fedora's cross gcc has no riscv64 glibc); the
+  Makefile skips it, and the ~1 GB `-dbg` package too (`DEB_PROFILES`, passed on as
+  `DEB_BUILD_PROFILES`; `dpkg-buildpackage -P` does not reach `debian/rules`).
+- CI on GitHub-hosted runners is untested: the debian flavor may hit the 6 h job limit or run out of
+  disk (~31 GB needed). If so: fewer flavors via *Run workflow*, or a self-hosted runner.
+
+## Workflow
+
+### Changing the kernel
+
+1. `make checkout-7.3` (creates `linux-7.3/` and applies missing patches; safe to repeat).
+2. Edit in `linux-7.3/` and **commit** there (one logical topic per commit, the reason in the
+   commit message and a comment in the code). To change an existing patch:
+   `git commit --fixup=<sha>` + `git rebase -i --autosquash v7.3`.
+3. `make export-7.3` writes the commits back to `linux-7.3-patches/`.
+4. New kernel version W: `cp -r linux-7.3-patches linux-W-patches`, `make checkout-W`, resolve
+   conflicts with `git am --continue`, run `scripts/kernel-tree.sh W` until everything is applied,
+   then `make export-W`. `VERSIONS` in the Makefile follows the `linux-*-patches/` directories.
+
+`kernel-tree.sh` recognises an applied patch by the subject of the commit.
+
+### Build and install
+
+```bash
+make deb-7.3-modules            # or deb-7.3-builtin, deb-7.3-debian, deb-7.3 (all three)
+milkv-tools/test-kernel.sh linux-image-7.3.0-k1-amdgpu-modules_7.3.0-1_riscv64.deb \
+    7.3.0-k1-amdgpu-modules     # install, set boot.scr, reboot, checks, screenshot
+# or by hand: milkv-tools/install-deb.sh <deb>; milkv-tools/set-boot.sh <release>; reboot
+```
+
+- Build times on the laptop (16 threads): builtin/modules ~10–15 min, debian ~50 min (debug info,
+  ~3000 modules). The debian flavor needs `pahole` in `PATH` (`sudo dnf install dwarves`); this
+  session used an unpacked copy because sudo needs a password.
+- `/boot` (715 MB) is the bottleneck: ~100 MB per builtin/modules kernel, ~150 MB per debian
+  kernel (Debian also creates an initrd for builtin kernels). Remove tested kernels with
+  `sudo apt-get purge linux-image-<release>` (never the running one).
+
+- Package revision: automatically the highest `.deb` in the root + 1, or pass `PKGREV=n`.
+- `LOCALVERSION=` (empty) is set by the Makefile, otherwise the version gets `+`/`-dirty`.
+- Changing the config: `make menuconfig-7.3-modules`, then `make savedefconfig-7.3-modules`
+  (writes to `linux-7.3/arch/riscv/configs/`; re-add the comment block at the top), commit and
+  `make export-7.3`.
+- Back to a previous kernel: `milkv-tools/set-boot.sh 7.2.0-k1-amdgpu-modules`, or load it by hand
+  from U-Boot (Ctrl-C, see `milk-v-testing.md`, step 13), or restore `/boot.cmd.<release>`.
+- Partitions: U-Boot `mmc 2:1` = `/` (`/dev/mmcblk0p1`), `mmc 2:3` = `/boot` (`/dev/mmcblk0p3`,
+  files in the root of that partition). The dtb is on `/` under `/usr/lib/linux-image-<version>/spacemit/`.
+- U-Boot: 3 s boot menu after reset; Ctrl-C → `=>` prompt; by hand:
+  `load mmc 2:1 ${scriptaddr} boot.scr; source ${scriptaddr}`.
+
+### Environment
+
+- Host: Fedora, this repo in `~/code/linux-kernel-jupiter-1`. Cross: `riscv64-linux-gnu-`.
+  Needs: `gcc-riscv64-linux-gnu`, `dpkg-dev`, `debhelper`, `fakeroot`, `flex`, `bison`, `bc`,
+  `openssl-devel`, `elfutils-libelf-devel`, `dwarves` (pahole, for the debian flavor).
+- Git identity for commits and patches in this private project: `Bas Magré <bas@opvolger.net>`.
+- Board: `ssh 192.168.2.32` (key login, passwordless `sudo`). Netplan on DHCP.
+- Serial console: `/dev/ttyUSB0` 115200. **The user often uses `picocom` themselves**: first check
+  that the port is free (`fuser /dev/ttyUSB0`), otherwise characters get mixed up.
+  `python3 -I milkv-tools/ser.py <sec> "cmd" ...` (send + read), `python3 -I milkv-tools/catch.py
+  '<spam>' <sec>` (read, e.g. `'\x03'` to interrupt U-Boot).
+- Power: `milkv-tools/power.sh on|off|toggle|state` (Home Assistant plug
+  `switch.zolder_sonoff_plug_1`, token in `/home/opvolger/home-assistant.txt`). Prefer shutting the
+  board down cleanly first (`sudo poweroff`): a hard power cut has corrupted dpkg files before.
+- Watching the screen: `milkv-tools/screenshot.sh x.png [frames]` (UGREEN HDMI capture, found by
+  name; never capture `/dev/video0`/`video4`, those are the laptop webcam and another camera).
+  MJPEG 1920x1080 hung this session; the script uses the default format (1280x720).
+- TFTP (manual testing only): docker container `tftp` with `--network host`; root = the build
+  directory, e.g. `build/7.3-builtin/obj`. Use `tftpboot` in U-Boot (`tftp` does nothing).
+
+### Verify
+
+- `ssh 192.168.2.32 'uname -v; sudo dmesg | grep -i amdgpu'` → `Initialized amdgpu`, no ring/IB errors.
+- Quick GPU test (root, debugfs): `cat /sys/kernel/debug/dri/0/amdgpu_test_ib` → `ib ring tests passed`.
+- Artifacts: drag a window in KDE and look at the frames (`milkv-tools/screenshot.sh f.png 9`;
+  triangles from the taskbar to a point at the top = stale vertex data).

@@ -1,0 +1,249 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bas=20Magr=C3=A9?= <bas@opvolger.net>
+Date: Mon, 19 Oct 2026 20:07:11 +0200
+Subject: [PATCH 04/12] PCI: spacemit-k1: Add INTx support
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The K1 root ports have no separate wire for legacy interrupts: INTx is
+signaled on the same physical line as MSI.  Create a linear IRQ domain
+for the four INTx lines on the optional "interrupt-controller" child
+node, and replace the DesignWare MSI-only chained handler with a
+combined handler that services both MSI and INTx.
+
+Device trees without the interrupt-controller node keep working
+MSI-only, as before.
+
+Signed-off-by: Bas Magré <bas@opvolger.net>
+---
+ drivers/pci/controller/dwc/pcie-spacemit-k1.c | 174 ++++++++++++++++++
+ 1 file changed, 174 insertions(+)
+
+diff --git a/drivers/pci/controller/dwc/pcie-spacemit-k1.c b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+index 12e9cd2dbcc2..8b8b9493da20 100644
+--- a/drivers/pci/controller/dwc/pcie-spacemit-k1.c
++++ b/drivers/pci/controller/dwc/pcie-spacemit-k1.c
+@@ -11,6 +11,8 @@
+ #include <linux/device.h>
+ #include <linux/err.h>
+ #include <linux/gfp.h>
++#include <linux/irqchip/chained_irq.h>
++#include <linux/irqdomain.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/of.h>
+ #include <linux/phy/phy.h>
+@@ -32,6 +34,11 @@
+ #define SMLH_LINK_UP			BIT(1)
+ #define RDLH_LINK_UP			BIT(12)
+ 
++#define K1_PHY_AHB_IRQSTATUS_INTX		0x0008
++#define K1_PHY_AHB_IRQENABLE_INTX		0x000c
++#define INTX_SHIFT			6
++#define INTX_MASK			GENMASK(9, 6)
++
+ #define INTR_ENABLE				0x0014
+ #define MSI_CTRL_INT			BIT(11)
+ 
+@@ -55,6 +62,8 @@ struct k1_pcie {
+ 	void __iomem *link;
+ 	struct regmap *pmu;	/* Errors ignored; MMIO-backed regmap */
+ 	u32 pmu_off;
++	struct irq_domain *intx_domain;
++	int intx_irq;
+ };
+ 
+ #define to_k1_pcie(dw_pcie) \
+@@ -127,6 +136,160 @@ static void k1_pcie_disable_aspm_l1(struct k1_pcie *k1)
+ 	dw_pcie_dbi_ro_wr_dis(pci);
+ }
+ 
++/*
++ * MSI and INTx are both signaled on the single physical IRQ line named
++ * "msi" -- the SpacemiT K1 root ports have no separate wire for legacy
++ * interrupts.  This combined handler replaces the DesignWare core's own
++ * MSI-only chained handler on that line (installed by
++ * dw_pcie_msi_host_init()) once dw_pcie_host_init() has finished with it,
++ * so both event sources keep getting serviced from a single physical
++ * interrupt.
++ */
++static void k1_pcie_combined_isr(struct irq_desc *desc)
++{
++	struct dw_pcie_rp *pp = irq_desc_get_handler_data(desc);
++	struct irq_chip *chip = irq_desc_get_chip(desc);
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct k1_pcie *k1 = to_k1_pcie(pci);
++	unsigned long hwirq, status;
++
++	chained_irq_enter(chip, desc);
++
++	if (pp->irq_domain)
++		dw_handle_msi_irq(pp);
++
++	status = readl_relaxed(k1->link + K1_PHY_AHB_IRQSTATUS_INTX);
++	status = (status & INTX_MASK) >> INTX_SHIFT;
++
++	for_each_set_bit(hwirq, &status, PCI_NUM_INTX)
++		generic_handle_domain_irq(k1->intx_domain, hwirq);
++
++	chained_irq_exit(chip, desc);
++}
++
++static void k1_intx_irq_mask(struct irq_data *d)
++{
++	struct dw_pcie_rp *pp = irq_data_get_irq_chip_data(d);
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct k1_pcie *k1 = to_k1_pcie(pci);
++	unsigned long flags;
++	u32 val;
++
++	raw_spin_lock_irqsave(&pp->lock, flags);
++
++	val = readl_relaxed(k1->link + K1_PHY_AHB_IRQENABLE_INTX);
++	val &= ~BIT(INTX_SHIFT + d->hwirq);
++	writel_relaxed(val, k1->link + K1_PHY_AHB_IRQENABLE_INTX);
++
++	raw_spin_unlock_irqrestore(&pp->lock, flags);
++}
++
++static void k1_intx_irq_unmask(struct irq_data *d)
++{
++	struct dw_pcie_rp *pp = irq_data_get_irq_chip_data(d);
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct k1_pcie *k1 = to_k1_pcie(pci);
++	unsigned long flags;
++	u32 val;
++
++	raw_spin_lock_irqsave(&pp->lock, flags);
++
++	val = readl_relaxed(k1->link + K1_PHY_AHB_IRQENABLE_INTX);
++	val |= BIT(INTX_SHIFT + d->hwirq);
++	writel_relaxed(val, k1->link + K1_PHY_AHB_IRQENABLE_INTX);
++
++	raw_spin_unlock_irqrestore(&pp->lock, flags);
++}
++
++static struct irq_chip k1_intx_irq_chip = {
++	.name		= "INTx",
++	.irq_mask	= k1_intx_irq_mask,
++	.irq_unmask	= k1_intx_irq_unmask,
++};
++
++static int k1_pcie_intx_map(struct irq_domain *domain, unsigned int irq,
++			    irq_hw_number_t hwirq)
++{
++	irq_set_chip_and_handler(irq, &k1_intx_irq_chip, handle_level_irq);
++	irq_set_chip_data(irq, domain->host_data);
++
++	return 0;
++}
++
++static const struct irq_domain_ops k1_intx_domain_ops = {
++	.map = k1_pcie_intx_map,
++};
++
++/*
++ * Create the INTx demultiplexing IRQ domain, targeted by interrupt-map
++ * entries in the root port's "interrupt-controller" child node.  This
++ * has to happen before dw_pcie_host_init() scans the bus and resolves
++ * each downstream function's legacy IRQ through that domain, so it's
++ * done from .init() rather than .post_init().
++ *
++ * The interrupt-controller node is optional, to remain compatible with
++ * device trees predating INTx support: root ports lacking it simply run
++ * MSI-only, as before.
++ */
++static int k1_pcie_init_intx_irq_domain(struct dw_pcie_rp *pp)
++{
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct k1_pcie *k1 = to_k1_pcie(pci);
++	struct device *dev = pci->dev;
++	struct device_node *intc;
++
++	intc = of_get_child_by_name(dev_of_node(dev), "interrupt-controller");
++	if (!intc)
++		return 0;
++
++	k1->intx_domain = irq_domain_create_linear(of_fwnode_handle(intc), PCI_NUM_INTX,
++						   &k1_intx_domain_ops, pp);
++	of_node_put(intc);
++	if (!k1->intx_domain)
++		return dev_err_probe(dev, -ENOMEM,
++				     "failed to create INTx IRQ domain\n");
++
++	return 0;
++}
++
++/*
++ * By the time .post_init() runs, dw_pcie_msi_host_init() (called from
++ * dw_pcie_host_init() right after .init() returns) has already resolved
++ * the "msi" IRQ into pp->msi_irq[0] and chained its own MSI-only handler
++ * onto it.  Take that same physical line over with a combined handler,
++ * so the one wire the hardware provides keeps servicing both MSI and
++ * INTx.  If MSI ended up disabled, resolve "msi" independently and
++ * chain an INTx-only handler on it instead.
++ */
++static void k1_pcie_post_init(struct dw_pcie_rp *pp)
++{
++	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
++	struct k1_pcie *k1 = to_k1_pcie(pci);
++	int irq;
++
++	if (!k1->intx_domain)
++		return;
++
++	irq = pp->msi_irq[0];
++	if (irq <= 0)
++		irq = platform_get_irq_byname(to_platform_device(pci->dev), "msi");
++	if (irq <= 0)
++		return;
++
++	k1->intx_irq = irq;
++	irq_set_chained_handler_and_data(irq, k1_pcie_combined_isr, pp);
++}
++
++static void k1_pcie_remove_intx_irq_domain(struct k1_pcie *k1)
++{
++	if (!k1->intx_domain)
++		return;
++
++	if (k1->intx_irq)
++		irq_set_chained_handler_and_data(k1->intx_irq, NULL, NULL);
++	irq_domain_remove(k1->intx_domain);
++}
++
+ static int k1_pcie_init(struct dw_pcie_rp *pp)
+ {
+ 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+@@ -178,6 +341,14 @@ static int k1_pcie_init(struct dw_pcie_rp *pp)
+ 	/* Finally, as a workaround, disable ASPM L1 */
+ 	k1_pcie_disable_aspm_l1(k1);
+ 
++	ret = k1_pcie_init_intx_irq_domain(pp);
++	if (ret) {
++		phy_exit(k1->phy);
++		k1_pcie_disable_resources(k1);
++
++		return ret;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -186,6 +357,8 @@ static void k1_pcie_deinit(struct dw_pcie_rp *pp)
+ 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
+ 	struct k1_pcie *k1 = to_k1_pcie(pci);
+ 
++	k1_pcie_remove_intx_irq_domain(k1);
++
+ 	/* Assert fundamental reset (drive PERST# low) */
+ 	regmap_set_bits(k1->pmu, k1->pmu_off + PCIE_CLK_RESET_CONTROL,
+ 			PCIE_RC_PERST);
+@@ -198,6 +371,7 @@ static void k1_pcie_deinit(struct dw_pcie_rp *pp)
+ static const struct dw_pcie_host_ops k1_pcie_host_ops = {
+ 	.init		= k1_pcie_init,
+ 	.deinit		= k1_pcie_deinit,
++	.post_init	= k1_pcie_post_init,
+ };
+ 
+ static bool k1_pcie_link_up(struct dw_pcie *pci)
