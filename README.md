@@ -133,14 +133,17 @@ USB stick or the eMMC, and boot them from the U-Boot prompt (Ctrl-C during the b
 
 ```bash
 setenv fdt_addr_r 0x31000000
-# eMMC is usually "mmc 2", the SD card "mmc 0" (check with "mmc list"; USB: "usb start", then "usb 0:1")
+# U-Boot numbering (SpacemiT U-Boot, checked with "mmc list"): SD card = mmc 0, eMMC = mmc 2
+# (there is no mmc 1). USB: "usb start", then "usb 0:1".
 load mmc 2:3 ${kernel_addr_r} /Image-7.3.0-k1-amdgpu.gz
 load mmc 2:3 ${fdt_addr_r} /k1-milkv-jupiter-7.3.0-k1-amdgpu.dtb
 setenv bootargs 'root=/dev/mmcblk0p1 rw rootwait swiotlb=131072 console=tty0 console=ttyS0,115200 earlycon radeon.cik_support=0 amdgpu.cik_support=1'
 booti ${kernel_addr_r} - ${fdt_addr_r}
 ```
 
-- `root=` must point at your root file system (here partition 1 of the eMMC, `/dev/mmcblk0p1`).
+- `root=` must point at your root file system, with **Linux** numbering, which differs from
+  U-Boot's: eMMC = `/dev/mmcblk0`, SD card = `/dev/mmcblk1` (here partition 1 of the eMMC,
+  `/dev/mmcblk0p1`).
 - `booti` decompresses the `.gz` itself through `kernel_comp_addr_r`/`kernel_comp_size`, which are
   already set in SpacemiT's U-Boot environment.
 - To make it permanent, put these lines in a `boot.cmd`, turn it into a `boot.scr` with
@@ -201,15 +204,22 @@ needs most of the runner's disk, so the job first removes preinstalled SDKs.
 | Kernel | Patches | Builds | Tested on the board |
 | --- | --- | --- | --- |
 | 7.2 | ✔ | ✔ builtin, modules, debian | ✔ all three (KDE Plasma without artifacts on 7.2 modules) |
-| 7.3 | ✔ | ✔ builtin, modules, debian | ✔ builtin and modules; ⚠ debian: sporadic userspace crashes (see below) |
+| 7.3 | ✔ | ✔ builtin, modules, debian | ✔ all three (debian with the performance-governor fix, see below) |
 
 On 19 Oct 2026 every kernel booted to a clean SDDM login screen with amdgpu working; the window
 dragging test for artifacts was only done on 7.2 (see [milk-v-testing.md](milk-v-testing.md),
 step 18).
 
-**Known issue:** the `debian` flavor showed sporadic userspace crashes with garbage pointers (once
-systemd itself, which froze the board) in 2 of 7 boots; `builtin` and `modules` are not affected.
-Under investigation, see [milk-v-testing.md](milk-v-testing.md), step 18. Use `modules` for now.
+**Known issues:**
+
+- With the `schedutil` cpufreq governor (Debian's default) the K1 crashed during boot in about a
+  quarter of the boots (garbage pointers, kernel Oops, once systemd itself, which froze the
+  board). All three configs here therefore use the `performance` governor (fixed 1.6 GHz), which
+  was stable in every test. Root cause not found yet; see
+  [milk-v-testing.md](milk-v-testing.md), step 18. Release `v0.8.0` was built before this fix:
+  use its `builtin`/`modules` packages, or a later release, for the `debian` flavor.
+- An NVMe SSD in the M.2 slot (pcie1) is not detected ("Device found, but not active"), with or
+  without these patches; see step 19.
 
 Known limitations: CPU writes to VRAM are uncached and therefore slower; the `linux-headers` deb is
 not built (cross-building it needs a riscv64 glibc); an HD 5450 (`radeon` driver) probably needs

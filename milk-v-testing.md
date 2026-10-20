@@ -578,6 +578,80 @@ from step 14) was not possible remotely; a clean SDDM login screen counts as pas
   `RANDOMIZE_KSTACK_OFFSET_DEFAULT=y`, `SCHED_CLASS_EXT=y` (vector and preemption settings are the
   same). Plan: boot the debian kernel repeatedly with `transparent_hugepage=never`, count crashes,
   then bisect the rest. **Do not use the debian flavor as default until this is solved.**
+- Investigation (19–20 Oct, night):
+  - The systemd core dump (gdb + Debian debuginfod) crashes in `exec_serialize_invocation()` ←
+    `exec_spawn()`, but the reported `epc` is a `bne s9,s10,...` right after `jal free@plt`
+    (`ra == epc`): a branch cannot cause a *load* page fault. The exception information does not
+    match the code, so this is not a systemd bug.
+  - Stress tests on a running debian kernel did **not** reproduce it: 8 workers × 5 min spawning
+    python/gcc/sort processes with THP `always` (~1900 rounds), and 25 rounds of
+    `udevadm trigger` + `daemon-reload` + AppArmor reload. It only happens while booting.
+  - Boot loop with `transparent_hugepage=never`: boots 1–2 fine, boot 3 a **kernel Oops**:
+
+    ```text
+    Unable to handle kernel paging request at virtual address ffffffd87dd04740
+    [ffffffd87dd04740] pgd=000000009ff7dc01, p4d=..., pud=..., pmd=000000009f7000e7
+    Oops [#1]
+    watchdog: CPU6: Watchdog detected hard LOCKUP on cpu 7
+    rcu: INFO: rcu_sched detected stalls on CPUs/tasks: 2-...
+    ```
+
+    So THP is **not** the cause. The address is in the per-CPU area of the linear map and the PMD
+    is a valid 2 MB leaf (V, R, W, A, D): a page fault on a valid mapping means a stale TLB entry,
+    i.e. some hart did not see a change to the kernel page tables (or code), during the busy part
+    of the boot (~95 modules loading, systemd setting up services and BPF programs).
+  - Prime suspects now: options in the Debian config that modify kernel mappings/text at runtime
+    and are off in the modules config: `BPF_JIT` (+ `BPF_LSM`), `DYNAMIC_FTRACE`/`FUNCTION_TRACER`
+    (patches every module at load time), `KPROBES`; further `NUMA`, `MEMORY_HOTPLUG`/`ZONE_DEVICE`,
+    `HIBERNATION`, `KEXEC`, `INIT_ON_ALLOC_DEFAULT_ON`, `RANDOMIZE_KSTACK_OFFSET_DEFAULT`.
+    (`KFENCE` is built but disabled: `KFENCE_SAMPLE_INTERVAL=0`.)
+  - Next: rebuild the debian flavor with the ftrace/kprobes group off, then with BPF JIT off, and
+    boot each ~10 times (`bootloop.sh`-style: reboot, wait for ssh, count `unhandled signal`/Oops,
+    power-cycle on a hang). Also possible without a rebuild: `nosmp`/`maxcpus=1` to confirm it is
+    a cross-hart (TLB/icache shootdown) problem.
+  - **Cause narrowed down to cpufreq (night of 20 Oct).** Debian applies three RISC-V patches of its
+    own to 7.2.11, all about CPU frequency scaling on the K1 (`cpufreq-dt-platdev` allowlist and
+    OPP tables for K1/Jupiter); in 7.3 these are mainline. The two flavors differ there:
+
+    | | modules (never crashed) | debian (crashes) |
+    | --- | --- | --- |
+    | `cpufreq_dt` | built in, probes at ~1 s | module, loads at ~19 s |
+    | default governor | performance: fixed 1.6 GHz / 1.05 V, 0 transitions | schedutil: 614 MHz–1.6 GHz, 0.95/1.05 V |
+
+    All crashes happened around 19 s, when `cpufreq_dt` loads and schedutil starts switching.
+    Before that the CPU runs at what U-Boot left: 1.6 GHz at 1.05 V (`buck1`), measured with
+    `modprobe.blacklist=cpufreq_dt`.
+  - Boot series on `7.3.0-k1-amdgpu-debian` (crash = `unhandled signal`/Oops/lockup in the journal):
+
+    | Variant | Crashes |
+    | --- | --- |
+    | default (schedutil), all earlier boots | 5 of ~19 |
+    | `cpufreq.default_governor=performance` | **0 of 10** |
+    | `snd_hda_intel` blacklisted (crash at 19.4 s coincided with HDA probe) | 1 of 10 (a SIGILL) |
+    | control, same session, schedutil (default) | **2 of 10** (Oops + hang, systemd SIGSEGV + hang) |
+    | `cpufreq.default_governor=performance`, second series | **0 of 10** |
+
+    So the HDMI audio driver is not the cause (it loads in both flavors anyway); the
+    performance governor is the only change that removed the crashes.
+  - Runtime stress on the debian kernel did **not** reproduce it, all under full load on 8 cores:
+    only cluster 0 toggling 614↔1600 MHz every 10 ms (1862 switches); both clusters toggling
+    (~3300); both clusters fixed at each OPP for 60 s; both clusters stepping together
+    1228.8↔1600 MHz, i.e. a real 0.95↔1.05 V step each time (4116 steps, also loading
+    `cpufreq_dt` under load); random OPP hopping per cluster every 5 ms (~13,000 hops). So it is
+    not simply the voltage ramp (5 mV/µs, same as the vendor kernel) or one marginal OPP.
+    Differences with the vendor kernel: it has one OPP table for both clusters (they always
+    switch together) and scales TCM/ACE with the core clock (mainline does that too: they are
+    dividers of the core clock). The board has no cpuidle states besides WFI. No I2C/regulator
+    errors in the logs.
+  - In total: performance 0 of 20 boots, schedutil about a quarter of the boots.
+  - Root cause still open; the boot-time combination (many modules loading, udev, schedutil)
+    matters. **Workaround in this repo:** `scripts/debian-defconfig.sh` now sets
+    `CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y` (schedutil stays available at runtime), like the modules
+    flavor. Patch 0012 regenerated for 7.2 and 7.3.
+  - **Final test:** `linux-image-7.3.0-k1-amdgpu-debian_7.3.0-2` (built with the regenerated
+    defconfig) installed and booted 10 times with plain bootargs: **0 crashes**, governor
+    `performance` on both clusters, amdgpu IB tests pass, SDDM login screen clean, kernel not
+    tainted, HDMI audio (`snd_hda_intel`) loaded. The board was left on this kernel.
 - The checks above are now one script: `milkv-tools/test-kernel.sh <deb> <release>`.
 - End state on the board: default `7.3.0-k1-amdgpu-debian` (`/boot.cmd`), also installed
   `7.3.0-k1-amdgpu-modules` and `7.2.0-k1-amdgpu-modules` (fallbacks; switch with
@@ -590,6 +664,31 @@ from step 14) was not possible remotely; a clean SDDM login screen counts as pas
   the default format works. `milkv-tools/screenshot.sh` now uses the default format, finds the UGREEN
   device by name (video numbers change on replug; the laptop webcam must not be used) and kills
   ffmpeg after 30 s.
+
+### 19. NVMe in the M.2 slot (pcie1) is not detected (20 Oct 2026, night)
+
+- The user's NVMe SSD in the M.2 slot is not seen: pcie1 (`ca400000`, port B, x2) always logs
+  `spacemit-k1-pcie ca400000.pcie: Device found, but not active` (receiver detected, but the link
+  never trains); `lspci` only shows the root port `0001:00:00.0`. The GPU on pcie2 works.
+- Not caused by our patches: a **vanilla 7.3** (no patches, modules config, amdgpu blacklisted)
+  shows exactly the same.
+- Note: the old boot logs in the journal of this rootfs are from a StarFive VisionFive 2 (the root
+  partition came from that board) and say nothing about the Jupiter.
+- Device tree: pcie1 is set up like pcie2 (same 3.3 V regulator, own PHY, pinctrl `pcie1_3_cfg`
+  = pads 59/60/61 for PERST#/WAKE#/CLKREQ#). The vendor kernel (`k1-x_milkv-jupiter.dts`) uses
+  the same pads, but `PULL_DIS` and drive strength DS2 instead of pull-up/21, and sets
+  `num-lanes = <2>` and `max-link-speed = <2>`. There is no separate M.2 power GPIO in either.
+  The PCIe PHY calibration comes from the combo PHY (enabled for USB 3) and is shared with pcie2.
+- A bug report on the linux-riscv list (Aug 2026, Milk-V Jupiter) says a Samsung PM9B1 NVMe in
+  the M.2 slot *works* on mainline, so port B is not generally broken. In that thread SpacemiT
+  found that setting `IGNORE_PERSTN` (BIT 2 of the PMU `PCIE_CONTROL_LOGIC` register) during RC
+  init fixes other cards that showed "Device found, but not active" on port C.
+- Tried: 7.3 with our patches + `IGNORE_PERSTN` set in `k1_pcie_init()` (branch `nvme-test-7.3`
+  in `.kernel.git`, worktree `linux-7.3-nvme`): **still "Device found, but not active"**.
+- Next ideas: which SSD is it (model, PCIe generation; an M.2 **SATA** SSD never links on PCIe)?
+  Try it in another machine; try the vendor pin settings (no pull-up, DS2) and
+  `num-lanes = <2>`/`max-link-speed = <1>` in the dts; a longer wait for link-up; read the LTSSM
+  state from the `link` registers after probe.
 
 ## Building a Debian package (.deb)
 

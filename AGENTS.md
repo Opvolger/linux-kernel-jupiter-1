@@ -1,38 +1,44 @@
 # AGENTS.md — Milk-V Jupiter (SpacemiT K1) + AMD GPU
 
-Read this first. The full log (what, why, with logs) is in `milk-v-testing.md`, steps 1–18.
+Read this first. The full log (what, why, with logs) is in `milk-v-testing.md`, steps 1–19.
 After **every failed attempt**, update that log (what went wrong and why), and add a comment with
 the reason to every kernel change. The user chats in Dutch; everything in this repo is English.
 
-## Current state (19 Oct 2026, end of session)
+## Current state (20 Oct 2026, morning)
 
 - Board: Milk-V Jupiter (K1, 8 GB). GPU: AMD R9 290/390 (Hawaii, CIK) on pcie2 through a riser
   (Gen1 x1). Debian 13 (trixie) + KDE Plasma 6 (Wayland) runs **without artifacts** (window
   dragging test done on 7.2 modules, step 14/15).
 - Patch series `linux-7.2-patches/` and `linux-7.3-patches/` (12 patches each), three flavors.
-  **All six kernels (7.2/7.3 × builtin/modules/debian) were tested on the board** (step 18): PCIe
-  link, amdgpu init, IB ring tests, SDDM login screen over HDMI. Artifact test (dragging windows)
-  was not repeated for 7.3 and the debian flavor — do that when someone is at the board.
-- On the board now: default **`7.3.0-k1-amdgpu-modules`**; also installed `7.3.0-k1-amdgpu-debian`
-  and `7.2.0-k1-amdgpu-modules`. The user wants to run the **debian** flavor long term, but see the
-  next point first.
-- **Open bug, debian flavor only:** sporadic userspace crashes with wild pointers (`SEGV_MAPERR`)
-  in 2 of 7 boots of `7.3.0-k1-amdgpu-debian`: `nfsrahead`, and once **systemd (PID 1)**, which froze
-  the board (`unhandled signal 11 code 0x1 at 0xffffffffffffffbf in libsystemd-core-257.so`, load
-  page fault). Never seen with the builtin/modules kernels (>10 boots). Config differences that
-  could explain it: `TRANSPARENT_HUGEPAGE_ALWAYS=y` (prime suspect), `NUMA`, `KFENCE`,
-  `INIT_ON_ALLOC_DEFAULT_ON`, `RANDOMIZE_KSTACK_OFFSET_DEFAULT`, `SCHED_CLASS_EXT`. Next step:
-  boot the debian kernel repeatedly with `transparent_hugepage=never` (no rebuild needed) and count
-  crashes (`coredumpctl list`); then bisect the other options. Coredumps are on the board. Boots automatically via
-  `/boot.scr` (U-Boot `bootmenu_0`, `bootdelay=3`); switch with `milkv-tools/set-boot.sh <release>`.
-  Backups of earlier boot scripts: `/boot.cmd.<release>`. `/boot` has 261 MB free.
+  All six kernels (7.2/7.3 × builtin/modules/debian) boot to the SDDM login screen with amdgpu
+  working (step 18). Artifact test (dragging windows) not repeated for 7.3/debian.
+- **Debian-flavor boot crashes: worked around.** With Debian's default cpufreq governor
+  (schedutil) the K1 crashed in about a quarter of the boots, right when `cpufreq_dt` loads
+  (~19 s): wild pointers, SIGILL, a kernel Oops on a valid mapping, systemd (PID 1) dying → hang.
+  With the performance governor: 0 of 20 boots. `scripts/debian-defconfig.sh` now sets
+  `CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y` (patch 0012 regenerated for 7.2 and 7.3). Root cause still
+  unknown: runtime DVFS stress (~20,000 frequency/voltage switches under full load) never crashed;
+  the audio driver, THP, the voltage ramp and single OPPs were ruled out. Details: step 18.
+- On the board now: default **`7.3.0-k1-amdgpu-debian` package `7.3.0-2`** (the fixed one, the
+  flavor the user wants to run); also installed `7.3.0-k1-amdgpu-modules` and
+  `7.2.0-k1-amdgpu-modules` (fallbacks). Boots via `/boot.scr`; switch with
+  `milkv-tools/set-boot.sh <release>`. Board-side helper `/var/tmp/setargs.sh [args]` rewrites the
+  bootargs line of `/boot.cmd` (standard args + extras) and rebuilds `boot.scr`.
+- **NVMe in the M.2 slot (pcie1) is not detected**: "Device found, but not active", also with a
+  vanilla 7.3 and with the `IGNORE_PERSTN` fix (step 19). Open; ask the user which SSD it is.
+- GitHub: remote `origin` = `git@github.com:Opvolger/linux-kernel-jupiter-1.git`; the user pushed an
+  `init` commit; tag `v0.8.0` ran the whole workflow successfully (all 6 jobs + release; debian
+  jobs ~2.5 h). Release v0.8.0 has 6 `.deb`s plus `Image-*.gz`/`.dtb`/`config-*` of the builtin
+  kernels (package revision = run number, so `7.x.0-1`). Note: v0.8.0 was tagged **before** the
+  governor fix, so its debian packages still use schedutil. The fix (patch 0012, `scripts/debian-defconfig.sh`, docs) is not committed yet.
 - Built packages are in the repo root (`*.deb`, not in git). The two `-dbg` packages there (1.1 GB
-  each, from before `-dbg` was skipped) can be deleted.
-- Nothing has been committed to this repo yet and it has no GitHub remote yet (the user decides
-  when). `.github/workflows/build.yml` is ready but has never run on GitHub; it passes actionlint
-  and its checkout path (`KERNEL_DEPTH=1` from the GitHub mirror) was tested locally.
-- The old pre-restructure tree `linux/` (9.4 GB, in-tree build, not in git) is no longer needed and
-  can be removed; `.kernel.git` has its own copy of the objects.
+  each) can be deleted.
+- The old pre-restructure tree `linux/` (9.4 GB, not in git) can be removed. Experiment worktrees
+  `linux-7.3-vanilla` and `linux-7.3-nvme` (branch `nvme-test-7.3`) and build dirs
+  `build/7.3-{vanilla,nvme,dbg-noftrace,dbg-nobpfjit}` can be removed too
+  (`git -C .kernel.git worktree remove ...`).
+- pahole is still not installed on the laptop (`sudo dnf install dwarves`); this session used an
+  unpacked copy, needed for BTF/sched_ext in the debian flavor.
 
 ## Pick up next time
 
@@ -40,7 +46,8 @@ the reason to every kernel change. The user chats in Dutch; everything in this r
 2. Newer kernel W released? `cp -r linux-7.3-patches linux-W-patches && make checkout-W`, fix
    conflicts, `make export-W`, `scripts/fetch-debian-config.sh && make debian-defconfig-W`
    (amend patch 0012), `make deb-W`, then `milkv-tools/test-kernel.sh <deb> <release>` per flavor.
-3. Open items below.
+3. Commit the governor fix and docs, push, tag a new release (e.g. `v0.8.1`).
+4. NVMe (step 19), then the open items below.
 
 ## Repository layout
 
@@ -95,14 +102,19 @@ Bootargs (needed for Hawaii/CIK): `radeon.cik_support=0 amdgpu.cik_support=1`.
 - VRAM `ttm_uncached` **without** the traps.c emulation → `sddm-greeter` crashes in
   `libc.so.6+0x83502` (`sd t0,-8(a4)`).
 - Changing `pgprot_writecombine`/`pgprot_noncached`: identical to the vendor kernel, not the cause.
+- Debian-flavor boot crashes (step 18) — ruled out: THP (`transparent_hugepage=never` still
+  crashed), the HDMI audio driver (blacklisted `snd_hda_intel` still crashed), the CPU voltage
+  ramp and single OPPs (runtime stress never crashed), cpuidle (no states besides WFI), I2C errors
+  (none logged). Rebuild variants without ftrace/kprobes or BPF JIT were built but not tested
+  (superseded by the governor finding).
+- NVMe on pcie1 (step 19): `IGNORE_PERSTN` does not help; vanilla 7.3 fails the same way.
 - Vendor kernel reference (read only, do not copy): `spacemit-com/linux-6.6`, branch
   `k1-bl-v2.2.y`, grep for `CONFIG_SOC_SPACEMIT_K1X`.
 
 ## Open items
 
 - Artifact test (drag windows in KDE, capture frames) on 7.3 and the debian flavor.
-- One-off `nfsrahead` SIGSEGV (`SEGV_MAPERR`, jump to an unmapped address) during one boot of
-  `7.3.0-k1-amdgpu-debian` (step 18); not reproduced in 4 later boots. Watch `coredumpctl list`.
+- Root cause of the schedutil boot crashes (step 18); upstream report material.
 - First boot of a new debian-flavor kernel takes ~3.5 min (AppArmor compiles its profile cache);
   later boots ~40 s. Expected.
 - Slower because of uncached VRAM writes + a trap per misaligned tail. Possible improvement: only
@@ -112,8 +124,7 @@ Bootargs (needed for Hawaii/CIK): `radeon.cik_support=0 amdgpu.cik_support=1`.
 - The `linux-headers` deb can't be cross-built (Fedora's cross gcc has no riscv64 glibc); the
   Makefile skips it, and the ~1 GB `-dbg` package too (`DEB_PROFILES`, passed on as
   `DEB_BUILD_PROFILES`; `dpkg-buildpackage -P` does not reach `debian/rules`).
-- CI on GitHub-hosted runners is untested: the debian flavor may hit the 6 h job limit or run out of
-  disk (~31 GB needed). If so: fewer flavors via *Run workflow*, or a self-hosted runner.
+- CI works on GitHub-hosted runners: builtin/modules ~1 h, debian ~2.5 h (6 h limit, ~31 GB disk).
 
 ## Workflow
 
